@@ -8,7 +8,7 @@ can have independant snapshot intervals and retension without verbose crontabs.
 Quick-Start
 -----------
 
-We will download the main executable and put it somewhere on the path
+Download the main executable and put it somewhere on the path
 
     cd /usr/local/bin/
     sudo wget https://raw.githubusercontent.com/patrickglass/btrfs-snappy/master/btrfs-snap.py
