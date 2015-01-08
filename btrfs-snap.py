@@ -75,11 +75,11 @@ class Snappy(object):
         self.verbose = verbose
 
         if self.load_validate_config(config_file):
-            syslog.syslog("Loaded config from %s" % config_file)
+            self.info("Loaded config from %s" % config_file)
         else:
             # FIXME: This is just temporary for quick testing
             self.config = yaml.load(default_config)
-            syslog.syslog(syslog.LOG_ERR, "DEBUG: FIXME: Loading defaults!!")
+            self.error("DEBUG: FIXME: Loading defaults!!")
 
 
     def load_validate_config(self, config_file):
@@ -88,22 +88,23 @@ class Snappy(object):
         """
         if os.path.exists(config_file):
             self.config = yaml.load(file(config_file))
-            syslog.syslog("Loaded config from %s" % config_file)
+            msg = "Loaded config from %s"
+            self.error(msg, config_file)
         else:
-            msg = "Could not find %s. Loading Defaults." % config_file
-            syslog.syslog(syslog.LOG_ERR, msg)
+            msg = "Could not find %s. Loading Defaults."
+            self.error(msg, config_file)
             return False
         if not self.config:
             msg = "YAML config file was empty."
-            syslog.syslog(syslog.LOG_ERR, msg)
+            self.error(msg)
             return False
         if 'retention' not in self.config:
             msg = "retention section in config file could not be found."
-            syslog.syslog(syslog.LOG_ERR, msg)
+            self.error(msg)
             return False
         if 'default' not in self.config['retention']:
             msg = "retention section in config file could not be found."
-            syslog.syslog(syslog.LOG_ERR, msg)
+            self.error(msg)
             return False
         for named_retention in self.config['retention']:
             schedules = [
@@ -116,16 +117,16 @@ class Snappy(object):
             ]
             for t in schedules:
                 if not hasattr(named_retention, t):
-                    msg = "%s is missing retention integer for %s" % (named_retention, t)
-                    syslog.syslog(syslog.LOG_ERR, msg)
+                    msg = "%s is missing retention integer for %s"
+                    self.error(msg, named_retention, t)
                     return False
         if 'locations' not in self.config:
             msg = "locations section in config file could not be found."
-            syslog.syslog(syslog.LOG_ERR, msg)
+            self.error(msg)
             return False
         if len(self.config['locations']) < 1:
             msg = "you must have at least one subvolume location defined."
-            syslog.syslog(syslog.LOG_ERR, msg)
+            self.error(msg)
             return False
         for location in self.config['locations']:
             loc_attr = [
@@ -134,8 +135,8 @@ class Snappy(object):
             ]
             for t in loc_attr:
                 if not hasattr(location, t):
-                    msg = "%s is missing attribute %s" % (location, t)
-                    syslog.syslog(syslog.LOG_ERR, msg)
+                    msg = "%s is missing attribute %s"
+                    self.error(msg, location, t)
                     return False
         if self.verbose:
             print "Loaded Configuration: %s" % self.config
@@ -145,16 +146,13 @@ class Snappy(object):
         # Check the directory to ensure the users has correct permissions
         path = os.path.dirname(self.config_file)
         if not os.access(path, os.W_OK):
-            msg = "You do not have write permissions to directory %s" % path
-            syslog.syslog(syslog.LOG_ERR, msg)
+            msg = "You do not have write permissions to directory %s"
+            self.error(msg, path)
             raise RuntimeError("You do not have write permissions to directory %s" % path)
         with open(self.config_file, 'w') as f:
             f.write(self.default_config)
 
-    def log_error(self, message):
-        syslog.syslog(syslog.LOG_ERR, message)
-
-    def create(self, interval):
+    def create(self, interval, destination):
         locations = self.config['locations']
         for name in locations:
             location = locations[name]
@@ -167,36 +165,87 @@ class Snappy(object):
                 subvol = location
                 retention = self.config['retention']['default']
 
+            # Check that the subvolume is valid
+            if not os.path.isdir(subvol):
+                self.error("Subvolume '%s' does not exist!", subvol)
+                continue
+
+            self.info("Snapshotting %s", subvol)
+
             if interval not in retention:
-                msg = "%s is missing attribute %s" % (retention, interval)
-                syslog.syslog(syslog.LOG_ERR, msg)
+                msg = "%s is missing attribute %s" % ()
+                self.error(msg, retention, interval)
 
             retention = retention[interval]
-            print "%s:\n\tsubvolume: %s\n\tretention: %s\n" % (name, subvol, retention)
-        # subvol = self.config['locations'][name]
+            msg = "%s:\n\tsubvolume: %s\n\tretention: %s\n"
+            self.info(msg, name, subvol, retention)
 
-    def purge_old(self, name):
+            if retention < 1:
+                msg = "Skipping %s since the retension for %s is 0"
+                self.warn(msg, name, interval)
+                continue
+
+            self.purge_old(name, interval, retention)
+
+            cmd = ["btrfs", "subvol", "snapshot"]
+            # Add the readonly flag for all created snapshots
+            cmd.append("-r")
+            # Specify the subvolume to snapshot
+            cmd.append(subvol)
+            ts = datetime.datetime.now().isoformat()
+            snap_name = '_'.join([interval, ts])
+            # Build the destination folder relative to subvol root
+            dest = os.path.join(subvol, destination, snap_name)
+            cmd.append(os.path.abspath(dest))
+            self.info("Running [%s]", ' '.join(cmd))
+
+            try:
+                # TODO: uncomment once dev more stable.
+                # subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+                pass
+            except subprocess.CalledProcessError, e:
+                msg = "BTRFS Snapshot failed: Returned %s, %s"
+                self.error(msg, e.returncode, e.output)
+                continue
+
+    def purge_old(self, name, interval, retention):
         pass
+
+    def info(self, message, *params):
+        self._log_message(syslog.LOG_INFO, message, *params)
+
+    def error(self, message, *params):
+        self._log_message(syslog.LOG_ERR, message, *params)
+
+    def warn(self, message, *params):
+        self._log_message(syslog.LOG_WARNING, message, *params)
+
+    def _log_message(self, error, message, *params):
+        if params:
+            message = message % params
+        syslog.syslog(error, message)
+        if self.verbose:
+            print message
 
 
 def main():
     parser = argparse.ArgumentParser(description='Creates snapshots of btrfs subvolumes.')
-    
+
     parser.add_argument('interval', nargs='?', choices=[
                         'minute', 'hourly', 'daily', 'weekly', 'monthly', 'yearly'],
                         help='''specify the interval prefix used to name all snapshots
                             and for tracking the number of snapshots to keep.''')
     parser.add_argument('--create_config', action='store_true',
-                       help='Creates a new default config file at the location `--config`')
+                        help='Creates a new default config file at the location `--config`')
     parser.add_argument('-c', '--config',
                         default='/etc/btrfs-snappy.conf',
-                        help='''specify the location of the yaml config file 
+                        help='''specify the location of the yaml config file
                             (default: /etc/btrfs-snappy.conf)''')
     parser.add_argument('-d', '--destination',
-                        default='./snapshots/',
-                        help='''specify the location to place the snapshots 
-                            (defaults to .snapshots directory at the root of 
-                            the subvolume)''')
+                        default='.snapshots',
+                        help='''specify the location to place the snapshots
+                            relative to the subvolume root.
+                            (defaults to .snapshots)''')
     parser.add_argument("-q", "--quiet",
                         action="store_false", dest="verbose",
                         default=True,
@@ -216,9 +265,8 @@ def main():
     if not args.interval:
         parser.print_help()
         return 1
-    
-    s.create(args.interval)
-    s.purge_old(args.interval)
+
+    s.create(args.interval, args.destination)
     return 0
 
 
